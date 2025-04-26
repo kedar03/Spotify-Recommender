@@ -16,11 +16,18 @@ def ohe_prep(df, column, new_column):
 def create_feature_set(df, float_cols):
     from sklearn.feature_extraction.text import TfidfVectorizer
 
-    tfidf = TfidfVectorizer(max_features=500)
-    tfidf_matrix = tfidf.fit_transform(df['genres_consolidated'].apply(lambda x: " ".join(x)))
-    genre_df = pd.DataFrame.sparse.from_spmatrix(tfidf_matrix)
-    genre_df.columns = ['genre|' + i for i in tfidf.get_feature_names_out()]
-    genre_df.reset_index(drop=True, inplace=True)
+    # Make sure genres_consolidated is a valid string
+    if 'genres_consolidated' in df.columns:
+        df['genres_consolidated'] = df['genres_consolidated'].fillna('').astype(str)
+        
+        tfidf = TfidfVectorizer(max_features=500)
+        tfidf_matrix = tfidf.fit_transform(df['genres_consolidated'].apply(lambda x: " ".join(x.split())))
+        
+        genre_df = pd.DataFrame.sparse.from_spmatrix(tfidf_matrix)
+        genre_df.columns = ['genre|' + i for i in tfidf.get_feature_names_out()]
+        genre_df.reset_index(drop=True, inplace=True)
+    else:
+        genre_df = pd.DataFrame()
 
     year_ohe = ohe_prep(df, 'year', 'year') * 0.5
     popularity_ohe = ohe_prep(df, 'popularity_bucket', 'popularity') * 0.5
@@ -29,7 +36,10 @@ def create_feature_set(df, float_cols):
     scaler = MinMaxScaler()
     floats_scaled = pd.DataFrame(scaler.fit_transform(floats).astype('float32'), columns=floats.columns) * 0.2
 
-    final = pd.concat([genre_df, year_ohe, popularity_ohe, floats_scaled], axis=1, copy=False)
+    all_parts = [genre_df, year_ohe, popularity_ohe, floats_scaled]
+    all_parts = [p.reset_index(drop=True) for p in all_parts if not p.empty]
+
+    final = pd.concat(all_parts, axis=1, copy=False)
     final['id'] = df['id'].values
     return final
 
@@ -43,7 +53,7 @@ def generate_playlist_recos(df, features, nonplaylist_features, fallback_url='ht
 
     non_playlist_df_top_40 = non_playlist_df.sort_values('sim', ascending=False).head(40).copy()
 
-    # Use fallback Spotify logo
+    # Use fallback Spotify logo if missing
     non_playlist_df_top_40['url'] = fallback_url
     return non_playlist_df_top_40
 
