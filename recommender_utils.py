@@ -25,7 +25,7 @@ def create_feature_set(df, float_cols):
     year_ohe = ohe_prep(df, 'year', 'year') * 0.5
     popularity_ohe = ohe_prep(df, 'popularity_bucket', 'popularity_new') * 0.15
 
-    floats = df[float_cols].reset_index(drop=True)
+    floats = df[float_cols].select_dtypes(include=[np.number]).reset_index(drop=True)
     scaler = MinMaxScaler()
     floats_scaled = pd.DataFrame(scaler.fit_transform(floats), columns=floats.columns) * 0.2
 
