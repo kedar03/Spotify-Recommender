@@ -8,6 +8,8 @@ from skimage import io
 
 # --- One-Hot Encoding Helper ---
 def ohe_prep(df, column, new_column):
+    if column not in df.columns:
+        df[column] = "Unknown"  # Safe default if column missing
     tf_df = pd.get_dummies(df[column])
     feature_columns = tf_df.columns
     tf_df.columns = [new_column + "|" + str(i) for i in feature_columns]
@@ -17,21 +19,34 @@ def ohe_prep(df, column, new_column):
 # --- Feature Engineering ---
 def create_feature_set(df, float_cols):
     tfidf = TfidfVectorizer(max_features=2000)
-    # SAFE HANDLING: Fill NaNs with empty string and convert to string
+
+    # Ensure genres_consolidated column exists
+    if 'genres_consolidated' not in df.columns:
+        df['genres_consolidated'] = ''
+
+    # Fill NaNs and ensure string type
     df['genres_consolidated'] = df['genres_consolidated'].fillna('').astype(str)
-    tfidf_matrix = tfidf.fit_transform(df['genres_consolidated'].apply(lambda x: " ".join(x)))
+
+    # TF-IDF on cleaned genre text
+    tfidf_matrix = tfidf.fit_transform(df['genres_consolidated'])
     genre_df = pd.DataFrame(tfidf_matrix.toarray())
     genre_df.columns = ['genre|' + i for i in tfidf.get_feature_names_out()]
     genre_df.reset_index(drop=True, inplace=True)
 
+    # OHE year and popularity
     year_ohe = ohe_prep(df, 'year', 'year') * 0.5
     popularity_ohe = ohe_prep(df, 'popularity_bucket', 'popularity_new') * 0.15
 
+    # Scale float columns safely
     floats = df[float_cols].select_dtypes(include=[np.number]).reset_index(drop=True)
     scaler = MinMaxScaler()
     floats_scaled = pd.DataFrame(scaler.fit_transform(floats), columns=floats.columns) * 0.2
 
-    final = pd.concat([genre_df, floats_scaled, popularity_ohe, year_ohe], axis=1)
+    # Combine all features safely
+    all_parts = [genre_df, floats_scaled, popularity_ohe, year_ohe]
+    all_parts = [part.reset_index(drop=True) for part in all_parts if not part.empty]
+
+    final = pd.concat(all_parts, axis=1)
     final['id'] = df['id'].values
     return final
 
@@ -56,7 +71,7 @@ def generate_playlist_feature(complete_feature_set, playlist_df, weight_factor):
     return playlist_feature_set_weighted_final.sum(axis=0), complete_feature_set_nonplaylist
 
 # --- Recommendation Engine ---
-def generate_playlist_recos_2(df, features, nonplaylist_features, sp, fallback_url='https://i.ibb.co/rx5DFbs/spotify-logo.png'):
+def generate_playlist_recos_2(df, features, nonplaylist_features, sp=None, fallback_url='https://i.ibb.co/rx5DFbs/spotify-logo.png'):
     non_playlist_df = df[df['id'].isin(nonplaylist_features['id'].values)].copy()
     non_playlist_df['sim'] = cosine_similarity(
         nonplaylist_features.drop('id', axis=1).values,
@@ -66,13 +81,22 @@ def generate_playlist_recos_2(df, features, nonplaylist_features, sp, fallback_u
     non_playlist_df_top_40 = non_playlist_df.sort_values('sim', ascending=False).head(40).copy()
 
     track_ids = non_playlist_df_top_40['id'].tolist()
-    tracks_info = sp.tracks(track_ids)['tracks']
 
+    # Handle album artwork safely
     track_id_to_url = {}
-    for track in tracks_info:
-        images = track['album']['images']
-        url = images[1]['url'] if len(images) > 1 else images[0]['url'] if images else fallback_url
-        track_id_to_url[track['id']] = url
+
+    if sp is not None:
+        try:
+            tracks_info = sp.tracks(track_ids)['tracks']
+            for track in tracks_info:
+                images = track['album']['images']
+                url = images[1]['url'] if len(images) > 1 else images[0]['url'] if images else fallback_url
+                track_id_to_url[track['id']] = url
+        except Exception:
+            # If Spotify API fails, fallback for all
+            track_id_to_url = {track_id: fallback_url for track_id in track_ids}
+    else:
+        track_id_to_url = {track_id: fallback_url for track_id in track_ids}
 
     non_playlist_df_top_40['url'] = non_playlist_df_top_40['id'].map(track_id_to_url)
     return non_playlist_df_top_40
@@ -96,7 +120,7 @@ def visualize_songs(df, fallback_image):
         plt.imshow(image)
         plt.xticks(color='w', fontsize=0.1)
         plt.yticks(color='w', fontsize=0.1)
-        plt.xlabel(df['name'].values[i], fontsize=12)
+        plt.xlabel(df['name'].values[i] if 'name' in df.columns else '', fontsize=12)
         plt.tight_layout(h_pad=0.4, w_pad=0)
         plt.subplots_adjust(wspace=None, hspace=None)
 
