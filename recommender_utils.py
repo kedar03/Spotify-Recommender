@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.feature_extraction.text import TfidfVectorizer
+import matplotlib.pyplot as plt
 from skimage import io
 
 # --- One-Hot Encoding Helper ---
@@ -14,37 +16,45 @@ def ohe_prep(df, column, new_column):
 
 # --- Feature Engineering ---
 def create_feature_set(df, float_cols):
-    from sklearn.feature_extraction.text import TfidfVectorizer
-
-    # Make sure genres_consolidated is a valid string
-    if 'genres_consolidated' in df.columns:
-        df['genres_consolidated'] = df['genres_consolidated'].fillna('').astype(str)
-        
-        tfidf = TfidfVectorizer(max_features=500)
-        tfidf_matrix = tfidf.fit_transform(df['genres_consolidated'].apply(lambda x: " ".join(x.split())))
-        
-        genre_df = pd.DataFrame.sparse.from_spmatrix(tfidf_matrix)
-        genre_df.columns = ['genre|' + i for i in tfidf.get_feature_names_out()]
-        genre_df.reset_index(drop=True, inplace=True)
-    else:
-        genre_df = pd.DataFrame()
+    tfidf = TfidfVectorizer(max_features=2000)
+    tfidf_matrix = tfidf.fit_transform(df['genres_consolidated'].apply(lambda x: " ".join(x)))
+    genre_df = pd.DataFrame(tfidf_matrix.toarray())
+    genre_df.columns = ['genre|' + i for i in tfidf.get_feature_names_out()]
+    genre_df.reset_index(drop=True, inplace=True)
 
     year_ohe = ohe_prep(df, 'year', 'year') * 0.5
-    popularity_ohe = ohe_prep(df, 'popularity_bucket', 'popularity') * 0.5
+    popularity_ohe = ohe_prep(df, 'popularity_bucket', 'popularity_new') * 0.15
 
-    floats = df[float_cols]
+    floats = df[float_cols].reset_index(drop=True)
     scaler = MinMaxScaler()
-    floats_scaled = pd.DataFrame(scaler.fit_transform(floats).astype('float32'), columns=floats.columns) * 0.2
+    floats_scaled = pd.DataFrame(scaler.fit_transform(floats), columns=floats.columns) * 0.2
 
-    all_parts = [genre_df, year_ohe, popularity_ohe, floats_scaled]
-    all_parts = [p.reset_index(drop=True) for p in all_parts if not p.empty]
-
-    final = pd.concat(all_parts, axis=1, copy=False)
+    final = pd.concat([genre_df, floats_scaled, popularity_ohe, year_ohe], axis=1)
     final['id'] = df['id'].values
     return final
 
+# --- Playlist Feature Generation ---
+def generate_playlist_feature(complete_feature_set, playlist_df, weight_factor):
+    complete_feature_set_playlist = complete_feature_set[complete_feature_set['id'].isin(playlist_df['id'].values)]
+    complete_feature_set_playlist = complete_feature_set_playlist.merge(playlist_df[['id', 'date_added']], on='id', how='inner')
+    complete_feature_set_nonplaylist = complete_feature_set[~complete_feature_set['id'].isin(playlist_df['id'].values)]
+
+    playlist_feature_set = complete_feature_set_playlist.sort_values('date_added', ascending=False)
+    most_recent_date = playlist_feature_set.iloc[0, -1]
+
+    for ix, row in playlist_feature_set.iterrows():
+        playlist_feature_set.loc[ix, 'months_from_recent'] = int((most_recent_date.to_pydatetime() - row.iloc[-1].to_pydatetime()).days / 30)
+
+    playlist_feature_set['weight'] = playlist_feature_set['months_from_recent'].apply(lambda x: weight_factor ** (-x))
+
+    playlist_feature_set_weighted = playlist_feature_set.copy()
+    playlist_feature_set_weighted.update(playlist_feature_set_weighted.iloc[:, :-4].mul(playlist_feature_set_weighted['weight'], 0))
+    playlist_feature_set_weighted_final = playlist_feature_set_weighted.iloc[:, :-4]
+
+    return playlist_feature_set_weighted_final.sum(axis=0), complete_feature_set_nonplaylist
+
 # --- Recommendation Engine ---
-def generate_playlist_recos(df, features, nonplaylist_features, fallback_url='https://i.ibb.co/rx5DFbs/spotify-logo.png'):
+def generate_playlist_recos_2(df, features, nonplaylist_features, sp, fallback_url='https://i.ibb.co/rx5DFbs/spotify-logo.png'):
     non_playlist_df = df[df['id'].isin(nonplaylist_features['id'].values)].copy()
     non_playlist_df['sim'] = cosine_similarity(
         nonplaylist_features.drop('id', axis=1).values,
@@ -53,26 +63,33 @@ def generate_playlist_recos(df, features, nonplaylist_features, fallback_url='ht
 
     non_playlist_df_top_40 = non_playlist_df.sort_values('sim', ascending=False).head(40).copy()
 
-    # Use fallback Spotify logo if missing
-    non_playlist_df_top_40['url'] = fallback_url
+    track_ids = non_playlist_df_top_40['id'].tolist()
+    tracks_info = sp.tracks(track_ids)['tracks']
+
+    track_id_to_url = {}
+    for track in tracks_info:
+        images = track['album']['images']
+        url = images[1]['url'] if len(images) > 1 else images[0]['url'] if images else fallback_url
+        track_id_to_url[track['id']] = url
+
+    non_playlist_df_top_40['url'] = non_playlist_df_top_40['id'].map(track_id_to_url)
     return non_playlist_df_top_40
 
 # --- Visualization ---
-def visualize_songs(df, default_image_url='https://i.ibb.co/rx5DFbs/spotify-logo.png'):
-    import matplotlib.pyplot as plt
-
+def visualize_songs(df, fallback_image):
     temp = df['url'].values
     plt.figure(figsize=(15, int(0.625 * len(temp))))
     columns = 5
 
     for i, url in enumerate(temp):
         plt.subplot(len(temp) // columns + 1, columns, i + 1)
+
         try:
             if pd.isna(url) or url == '':
-                raise ValueError("Missing URL")
+                raise ValueError("Invalid URL")
             image = io.imread(url)
         except:
-            image = io.imread(default_image_url)
+            image = io.imread(fallback_image)
 
         plt.imshow(image)
         plt.xticks(color='w', fontsize=0.1)
