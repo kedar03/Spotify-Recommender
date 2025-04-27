@@ -17,6 +17,8 @@ def ohe_prep(df, column, new_column):
 # --- Feature Engineering ---
 def create_feature_set(df, float_cols):
     tfidf = TfidfVectorizer(max_features=2000)
+    # SAFE HANDLING: Fill NaNs with empty string and convert to string
+    df['genres_consolidated'] = df['genres_consolidated'].fillna('').astype(str)
     tfidf_matrix = tfidf.fit_transform(df['genres_consolidated'].apply(lambda x: " ".join(x)))
     genre_df = pd.DataFrame(tfidf_matrix.toarray())
     genre_df.columns = ['genre|' + i for i in tfidf.get_feature_names_out()]
